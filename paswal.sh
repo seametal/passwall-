@@ -249,7 +249,14 @@ uci commit passwall
 
 # 添加非SOCKS节点到备用列表（使用节点ID）
 echo "  添加非SOCKS节点到备用列表..."
+# 设置当前节点（使用节点ID）
+FIRST_GOOD_NODE=$(echo "$GOOD_NODES" | head -1)
+FIRST_NODE_DISPLAY=$(get_node_display_name "$FIRST_GOOD_NODE")
 for ID in $GOOD_NODES; do
+    # 跳过主节点
+    if [ "$ID" = "$FIRST_GOOD_NODE" ]; then
+        continue
+    fi
     NODE_DISPLAY=$(get_node_display_name "$ID")
     
     if [ "$SOCKS_SECTION" = "@socks[0]" ]; then
@@ -259,11 +266,6 @@ for ID in $GOOD_NODES; do
     fi
     echo "  ✅ 添加节点到Socks自动切换: $NODE_DISPLAY"
 done
-
-# 设置当前节点（使用节点ID）
-FIRST_GOOD_NODE=$(echo "$GOOD_NODES" | head -1)
-FIRST_NODE_DISPLAY=$(get_node_display_name "$FIRST_GOOD_NODE")
-
 if [ "$SOCKS_SECTION" = "@socks[0]" ]; then
     uci set passwall.@socks[0].$CURRENT_NODE_FIELD="$FIRST_GOOD_NODE"
 else
