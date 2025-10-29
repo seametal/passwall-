@@ -21,7 +21,11 @@ SOCKS_PROTOCOLS="socks socks5 Socks Socks5 SOCKS SOCKS5"
 
 BACKUP_FIELD="autoswitch_backup_node"
 CURRENT_NODE_FIELD="node"
-CHECK_PROCESS="xray"
+
+# 添加计数变量
+START_TIME=$(date +%s)
+CURRENT_TEST=0
+TOTAL_TESTS=0
 
 echo "============================"
 echo "🕓 $(date '+%F %T') - 开始测试（最终稳定版）"
@@ -87,13 +91,6 @@ is_valid_node() {
     if [ -z "$REMARKS" ]; then
         return 1
     fi
-    
-    # 检查是否有protocol字段
-    local PROTOCOL=$(uci get passwall.$NODE_ID.protocol 2>/dev/null)
-    if [ -z "$PROTOCOL" ]; then
-        return 1
-    fi
-    
     # 检查是否有address字段
     local ADDRESS=$(uci get passwall.$NODE_ID.address 2>/dev/null)
     if [ -z "$ADDRESS" ]; then
@@ -139,14 +136,18 @@ echo "✅ 有效节点数量: $VALID_COUNT 个"
 echo "❌ 无效节点数量: $INVALID_COUNT 个"
 
 # -------- 逐个测试节点 --------
+TOTAL_TESTS=$VALID_COUNT
+CURRENT_TEST=0
+
 for ID in $VALID_NODES; do
+    CURRENT_TEST=$((CURRENT_TEST + 1))
     NODE_DISPLAY=$(get_node_display_name "$ID")
     NODE_TYPE=$(uci get passwall.$ID.type 2>/dev/null)
     NODE_PROTOCOL=$(uci get passwall.$ID.protocol 2>/dev/null)
     [ -z "$NODE_TYPE" ] && NODE_TYPE="unknown"
     [ -z "$NODE_PROTOCOL" ] && NODE_PROTOCOL="unknown"
 
-    echo "➡️ 测试节点 [$ID]: $NODE_DISPLAY (协议: $NODE_TYPE/$NODE_PROTOCOL)"
+    echo "➡️ 测试节点 [$CURRENT_TEST/$TOTAL_TESTS]: $NODE_DISPLAY (协议: $NODE_TYPE/$NODE_PROTOCOL)"
 
     # 第一层过滤：跳过SOCKS节点
     case " $SOCKS_PROTOCOLS " in
@@ -179,33 +180,21 @@ for ID in $VALID_NODES; do
     WAIT=0
     PORT_READY=0
     while [ $WAIT -lt $PORT_WAIT_MAX ]; do
-        if netstat -tuln 2>/dev/null | grep -q ":$PROXY_PORT "; then
-            PORT_LISTEN=1
-        else
-            PORT_LISTEN=0
-        fi
-        
-        if pgrep -f "$CHECK_PROCESS" >/dev/null 2>&1; then
-            PROCESS_RUN=1
-        else
-            PROCESS_RUN=0
-        fi
-        
-        if [ $PORT_LISTEN -eq 1 ] && [ $PROCESS_RUN -eq 1 ]; then
-            PORT_READY=1
-            break
-        fi
-        sleep 1
-        WAIT=$((WAIT+1))
-        [ $((WAIT % 5)) -eq 0 ] && echo "  等待中... ($WAIT/$PORT_WAIT_MAX秒)"
+    if netstat -tuln 2>/dev/null | grep -q ":$PROXY_PORT "; then
+        echo "  ✅ 端口$PROXY_PORT已就绪"
+        PORT_READY=1
+        break
+    fi
+    sleep 1
+    WAIT=$((WAIT+1))
+    [ $((WAIT % 5)) -eq 0 ] && echo "  等待中... ($WAIT/$PORT_WAIT_MAX秒)"
     done
 
-    if [ $PORT_READY -eq 0 ]; then
-        echo "⚠️ 端口未就绪（超时），可能Xray未启动"
-        echo "$ID" >> "$TMP_BAD"
-        continue
-    fi
-    echo "  ✅ 端口$PROXY_PORT已就绪"
+if [ $PORT_READY -eq 0 ]; then
+    echo "⚠️ 端口未就绪（超时），可能代理未启动"
+    echo "$ID" >> "$TMP_BAD"
+    continue
+fi     
 
     # 测试代理连通性
     echo "  测试代理连通性..."
@@ -315,6 +304,12 @@ fi
 # -------- 清理临时文件 --------
 rm -f "$TMP_GOOD" "$TMP_BAD"
 
+# -------- 计算总用时 --------
+END_TIME=$(date +%s)
+TOTAL_TIME=$((END_TIME - START_TIME))
+MINUTES=$((TOTAL_TIME / 60))
+SECONDS=$((TOTAL_TIME % 60))
+
 echo "============================"
 echo "✅ 操作完成"
 echo "📊 统计信息:"
@@ -323,6 +318,8 @@ echo "   - 有效节点数量: $VALID_COUNT 个"
 echo "   - 无效节点数量: $INVALID_COUNT 个"
 echo "   - 可用非SOCKS节点: $GOOD_NODES_COUNT 个"
 echo "   - 已添加到Socks自动切换"
-echo "🕓 结束时间: $(date '+%F %T')"
+echo "⏱️ 用时统计:"
+echo "   - 开始时间: $(date -d "@$START_TIME" '+%F %T')"
+echo "   - 结束时间: $(date -d "@$END_TIME" '+%F %T')"
+echo "   - 总用时: ${MINUTES}分${SECONDS}秒"
 echo "============================"
-
