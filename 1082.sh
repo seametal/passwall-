@@ -40,12 +40,6 @@ is_valid_node() {
         return 1
     fi
     
-    # 检查是否有protocol字段
-    local PROTOCOL=$(uci get passwall.$NODE_ID.protocol 2>/dev/null)
-    if [ -z "$PROTOCOL" ]; then
-        return 1
-    fi
-    
     return 0
 }
 
@@ -87,7 +81,7 @@ echo "🔧 启用SOCKS1082测试环境..."
 uci set passwall.$NEW_SOCKS.enabled="1"
 uci commit passwall
 /etc/init.d/passwall reload
-sleep 3
+sleep 10
 
 # 3. 测试每个节点的响应时间
 echo "⏱️ 开始性能测试..."
@@ -121,7 +115,7 @@ for NODE in $VALID_NODES; do
     for TEST_URL in $TEST_URLS; do
         URL_COUNT=$((URL_COUNT + 1))
         START_TIME=$(date +%s%N)
-        if curl -I -s -m 10 --socks5 127.0.0.1:$NEW_PORT "$TEST_URL" >/dev/null 2>&1; then
+        if curl -I -s -m 15 --socks5 127.0.0.1:$NEW_PORT "$TEST_URL" >/dev/null 2>&1; then
             END_TIME=$(date +%s%N)
             RESPONSE_TIME=$(( (END_TIME - START_TIME) / 1000000 ))
             TOTAL_TIME=$((TOTAL_TIME + RESPONSE_TIME))
@@ -216,7 +210,7 @@ uci delete passwall.$NEW_SOCKS.autoswitch_backup_node 2>/dev/null
 # 设置主节点（使用节点ID）
 uci set passwall.$NEW_SOCKS.node="$MAIN_NODE"
 
-# 将所有其他节点添加到备用列表（使用节点ID）
+# === 修改点1：不再跳过主节点，主节点需要在备用列表中以便自动切换回去 ===
 echo "📋 备用节点列表:"
 COUNT=0
 while read line; do
@@ -225,19 +219,17 @@ while read line; do
     NODE=$(echo "$line" | awk '{print $3}')
     DISPLAY_NAME=$(echo "$line" | awk '{for(i=4;i<=NF;i++) printf $i" "}' | sed 's/ $//')
     
-    # 跳过主节点
-    if [ "$NODE" != "$MAIN_NODE" ]; then
-        uci add_list passwall.$NEW_SOCKS.autoswitch_backup_node="$NODE"
-        COUNT=$((COUNT + 1))
-        if [ $SPEED -eq 99999 ]; then
-            echo "  $COUNT. ❌ $DISPLAY_NAME"
-        else
-            echo "  $COUNT. ✅ $DISPLAY_NAME (${SPEED}ms, 成功率: ${SUCCESS_RATE}%)"
-        fi
+    # 不再跳过主节点！主节点需要在备用列表中以便自动切换回去
+    uci add_list passwall.$NEW_SOCKS.autoswitch_backup_node="$NODE"
+    COUNT=$((COUNT + 1))
+    if [ $SPEED -eq 99999 ]; then
+        echo "  $COUNT. ❌ $DISPLAY_NAME"
+    else
+        echo "  $COUNT. ✅ $DISPLAY_NAME (${SPEED}ms, 成功率: ${SUCCESS_RATE}%)"
     fi
 done < /tmp/all_nodes_sorted.txt
 
-# -------- 新增：处理负载均衡配置段 --------
+# -------- 处理负载均衡配置段 --------
 echo "🔄 处理负载均衡配置段..."
 HAPROXY_SECTIONS=""
 HAPROXY_INDEX=0
@@ -251,28 +243,31 @@ HAPROXY_COUNT=$(echo "$HAPROXY_SECTIONS" | wc -w)
 
 if [ $HAPROXY_COUNT -gt 0 ]; then
     echo "  找到负载均衡配置段: $HAPROXY_COUNT 个"
-    echo "  可用高性能节点: $(cat /tmp/node_ranking_sorted.txt | wc -l) 个"
     
-    # 只使用性能最好的节点来配置负载均衡
-    UPDATE_COUNT=$(( $(cat /tmp/node_ranking_sorted.txt | wc -l) < HAPROXY_COUNT ? $(cat /tmp/node_ranking_sorted.txt | wc -l) : HAPROXY_COUNT ))
-    echo "  将使用前 $UPDATE_COUNT 个高性能节点配置负载均衡"
-    
+    # === 修改点2：为负载均衡选择不同的节点（排除重复） ===
+    echo "  为负载均衡选择不重复的高性能节点..."
+    declare -A USED_NODES  # 记录已使用的节点
     NODE_INDEX=1
-    for section in $HAPROXY_SECTIONS; do
-        if [ $NODE_INDEX -le $UPDATE_COUNT ]; then
-            CURRENT_NODE_LINE=$(sed -n "${NODE_INDEX}p" /tmp/node_ranking_sorted.txt)
-            CURRENT_NODE_ID=$(echo "$CURRENT_NODE_LINE" | awk '{print $3}')
-            CURRENT_NODE_DISPLAY=$(echo "$CURRENT_NODE_LINE" | awk '{for(i=4;i<=NF;i++) printf $i" "}' | sed 's/ $//')
-            CURRENT_NODE_SPEED=$(echo "$CURRENT_NODE_LINE" | awk '{print $2}')
-            CURRENT_NODE_SUCCESS_RATE=$(echo "$CURRENT_NODE_LINE" | awk '{print $1}')
-            
-            uci set passwall.$section.lbss="$CURRENT_NODE_ID"
-            echo "  ✅ 设置负载均衡配置段 $section 节点为: $CURRENT_NODE_DISPLAY (${CURRENT_NODE_SPEED}ms, 成功率: ${CURRENT_NODE_SUCCESS_RATE}%)"
-            NODE_INDEX=$((NODE_INDEX + 1))
+    SECTION_INDEX=0
+    
+    # 按性能排序选择不同的节点
+    while read line && [ $SECTION_INDEX -lt $HAPROXY_COUNT ]; do
+        NODE_ID=$(echo "$line" | awk '{print $3}')
+        NODE_DISPLAY=$(echo "$line" | awk '{for(i=4;i<=NF;i++) printf $i" "}' | sed 's/ $//')
+        NODE_SPEED=$(echo "$line" | awk '{print $2}')
+        NODE_SUCCESS_RATE=$(echo "$line" | awk '{print $1}')
+        
+        # 检查节点是否已使用（负载均衡不能重复）
+        if [ -z "${USED_NODES[$NODE_ID]}" ]; then
+            USED_NODES[$NODE_ID]=1
+            SECTION=$(echo "$HAPROXY_SECTIONS" | awk -v idx=$((SECTION_INDEX + 1)) '{print $idx}')
+            uci set passwall.$SECTION.lbss="$NODE_ID"
+            echo "  ✅ 设置负载均衡 $SECTION 节点为: $NODE_DISPLAY (${NODE_SPEED}ms, 成功率: ${NODE_SUCCESS_RATE}%)"
+            SECTION_INDEX=$((SECTION_INDEX + 1))
         else
-            echo "  ⚠️ 跳过配置段 $section (无更多可用高性能节点)"
+            echo "  ⚠️ 跳过重复节点（负载均衡）: $NODE_DISPLAY"
         fi
-    done
+    done < /tmp/node_ranking_sorted.txt
 else
     echo "  ⚠️ 未找到负载均衡配置段，跳过负载均衡更新"
 fi
@@ -283,7 +278,7 @@ echo ""
 echo "✅ SOCKS1082配置完成！"
 echo "🎯 主节点: $MAIN_DISPLAY (${MAIN_SPEED}ms, 成功率: ${MAIN_SUCCESS_RATE}%)"
 echo "📦 备用节点: $COUNT 个"
-echo "⚖️ 负载均衡节点: $((NODE_INDEX - 1)) 个"
+echo "⚖️ 负载均衡节点: $SECTION_INDEX 个"
 echo "🌐 使用端口: 1082"
 
 # 验证最终配置

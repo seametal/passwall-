@@ -91,6 +91,7 @@ is_valid_node() {
     if [ -z "$REMARKS" ]; then
         return 1
     fi
+
     # 检查是否有address字段
     local ADDRESS=$(uci get passwall.$NODE_ID.address 2>/dev/null)
     if [ -z "$ADDRESS" ]; then
@@ -242,10 +243,6 @@ echo "  添加非SOCKS节点到备用列表..."
 FIRST_GOOD_NODE=$(echo "$GOOD_NODES" | head -1)
 FIRST_NODE_DISPLAY=$(get_node_display_name "$FIRST_GOOD_NODE")
 for ID in $GOOD_NODES; do
-    # 跳过主节点
-    if [ "$ID" = "$FIRST_GOOD_NODE" ]; then
-        continue
-    fi
     NODE_DISPLAY=$(get_node_display_name "$ID")
     
     if [ "$SOCKS_SECTION" = "@socks[0]" ]; then
